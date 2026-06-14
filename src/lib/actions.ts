@@ -96,10 +96,17 @@ export async function joinTournament(
   return {};
 }
 
-export async function startTournament(fd: FormData) {
-  if ((await getSession())?.role !== "admin") throw new Error("Admins only");
+export async function startTournament(
+  _prev: FormState,
+  fd: FormData,
+): Promise<FormState> {
+  if ((await getSession())?.role !== "admin") return { error: "Admins only." };
   const id = str(fd, "tournamentId");
-  await generateBracket(id);
+  try {
+    await generateBracket(id);
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : "Failed to generate bracket." };
+  }
   revalidatePath(`/t/${id}`);
   redirect(`/t/${id}`);
 }

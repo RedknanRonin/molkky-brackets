@@ -54,7 +54,7 @@ export default async function RootLayout({
         <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-6">{children}</main>
 
         <footer className="border-t border-black/10 py-4 text-center text-xs text-black/50">
-          Mölkky tournament tracker · first to exactly 50 wins
+          Mölkky
         </footer>
       </body>
     </html>

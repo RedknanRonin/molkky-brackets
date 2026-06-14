@@ -2,12 +2,9 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { getSession } from "@/lib/auth";
-import {
-  startTournament,
-  removePlayer,
-  deleteTournament,
-} from "@/lib/actions";
+import { removePlayer, deleteTournament } from "@/lib/actions";
 import { JoinForm } from "@/components/forms";
+import { StartBracketForm } from "@/components/start-bracket-form";
 import { AutoRefresh } from "@/components/auto-refresh";
 import {
   Bracket,
@@ -163,18 +160,10 @@ export default async function TournamentPage({
           </div>
 
           {isAdmin && (
-            <form action={startTournament} className="flex items-center gap-3">
-              <input type="hidden" name="tournamentId" value={t.id} />
-              <button
-                disabled={t.players.length < 2}
-                className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
-              >
-                Generate bracket &amp; start
-              </button>
-              {t.players.length < 2 && (
-                <span className="text-xs text-black/50">Need at least 2 players.</span>
-              )}
-            </form>
+            <StartBracketForm
+              tournamentId={t.id}
+              playerCount={t.players.length}
+            />
           )}
         </section>
       )}

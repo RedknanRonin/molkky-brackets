@@ -1,9 +1,5 @@
 import "server-only";
 import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@/generated/prisma/client";
-
-// A minimal transaction client type (the parts we use).
-type Tx = Prisma.TransactionClient;
 
 // ---------- helpers ----------
 
@@ -13,9 +9,6 @@ function nextPow2(n: number) {
   return Math.max(p, 1);
 }
 
-// Standard single-elimination seed slot order for a bracket of `size` (power of 2).
-// Returns seed numbers (1-indexed) in slot order, so that top seeds are spread out
-// and the lowest seeds face the highest.
 function seedOrder(size: number): number[] {
   let seeds = [1, 2];
   while (seeds.length < size) {
@@ -127,11 +120,10 @@ export async function computeStandings(
 }
 
 // ---------- bracket builders ----------
+// NOTE: We use plain `prisma.*` calls (no interactive transactions) to stay
+// compatible with the PrismaPg driver adapter used on Vercel.
 
-// Build a single-elimination bracket from an ordered list of seeded player ids.
-// Returns the id of the final match.
 async function createSingleElim(
-  tx: Tx,
   tournamentId: string,
   orderedPlayerIds: string[],
   startMatchNumber = 1,
@@ -140,20 +132,20 @@ async function createSingleElim(
   if (n < 2) return null;
   const size = nextPow2(n);
   const order = seedOrder(size);
-  // slotPlayers[i] = player id at bracket slot i (or null = bye)
   const slotPlayers = order.map((seed) =>
     seed <= n ? orderedPlayerIds[seed - 1] : null,
   );
 
   const totalRounds = Math.log2(size);
-  const grid: string[][] = []; // grid[round-1] = match ids
+  const grid: string[][] = [];
   let matchNumber = startMatchNumber;
 
+  // 1. Create all match shells
   for (let r = 1; r <= totalRounds; r++) {
     const count = size / 2 ** r;
     const ids: string[] = [];
     for (let i = 0; i < count; i++) {
-      const m = await tx.match.create({
+      const m = await prisma.match.create({
         data: {
           tournamentId,
           stage: "KNOCKOUT",
@@ -167,10 +159,10 @@ async function createSingleElim(
     grid.push(ids);
   }
 
-  // link winners forward
+  // 2. Link winners forward
   for (let r = 0; r < totalRounds - 1; r++) {
     for (let i = 0; i < grid[r].length; i++) {
-      await tx.match.update({
+      await prisma.match.update({
         where: { id: grid[r][i] },
         data: {
           nextMatchId: grid[r + 1][Math.floor(i / 2)],
@@ -180,29 +172,27 @@ async function createSingleElim(
     }
   }
 
-  // seed round 1
+  // 3. Seed round 1
   for (let i = 0; i < grid[0].length; i++) {
-    await tx.match.update({
+    await prisma.match.update({
       where: { id: grid[0][i] },
       data: { player1Id: slotPlayers[2 * i], player2Id: slotPlayers[2 * i + 1] },
     });
   }
 
-  // resolve byes (a round-1 match with exactly one player auto-advances)
+  // 4. Resolve byes (exactly one player → auto-advance)
   for (let i = 0; i < grid[0].length; i++) {
     const p1 = slotPlayers[2 * i];
     const p2 = slotPlayers[2 * i + 1];
     if ((p1 && !p2) || (!p1 && p2)) {
-      await completeAndAdvance(tx, grid[0][i], (p1 ?? p2)!, null, null, "BYE");
+      await advanceWinner(grid[0][i], (p1 ?? p2)!, null, null, "BYE");
     }
   }
 
   return grid[totalRounds - 1][0];
 }
 
-// Round-robin schedule via the circle method.
 async function createRoundRobin(
-  tx: Tx,
   tournamentId: string,
   playerIds: string[],
   stage: "ROUND_ROBIN" | "GROUP",
@@ -210,7 +200,7 @@ async function createRoundRobin(
   startMatchNumber = 1,
 ) {
   const arr: (string | null)[] = [...playerIds];
-  if (arr.length % 2 === 1) arr.push(null); // bye marker
+  if (arr.length % 2 === 1) arr.push(null);
   const rounds = arr.length - 1;
   const half = arr.length / 2;
   let matchNumber = startMatchNumber;
@@ -220,7 +210,7 @@ async function createRoundRobin(
       const a = arr[i];
       const b = arr[arr.length - 1 - i];
       if (a && b) {
-        await tx.match.create({
+        await prisma.match.create({
           data: {
             tournamentId,
             stage,
@@ -234,86 +224,25 @@ async function createRoundRobin(
         });
       }
     }
-    // rotate (keep first fixed)
     arr.splice(1, 0, arr.pop()!);
   }
   return matchNumber;
 }
 
-// ---------- public API ----------
+// ---------- internal helpers ----------
 
-export async function generateBracket(tournamentId: string) {
-  return prisma.$transaction(async (tx) => {
-    const t = await tx.tournament.findUnique({
-      where: { id: tournamentId },
-      include: { players: { orderBy: { createdAt: "asc" } }, matches: true },
-    });
-    if (!t) throw new Error("Tournament not found");
-    if (t.matches.length > 0) throw new Error("Tournament already started");
-    if (t.players.length < 2) throw new Error("Need at least 2 players");
-
-    // assign seeds by join order
-    const players = t.players;
-    for (let i = 0; i < players.length; i++) {
-      await tx.player.update({ where: { id: players[i].id }, data: { seed: i + 1 } });
-    }
-    const ids = players.map((p) => p.id);
-
-    if (t.format === "SINGLE_ELIM") {
-      await createSingleElim(tx, tournamentId, ids);
-    } else if (t.format === "ROUND_ROBIN") {
-      await createRoundRobin(tx, tournamentId, ids, "ROUND_ROBIN", null);
-    } else {
-      // GROUP_KNOCKOUT
-      const settings = (t.settings as Settings) ?? {};
-      const groupCount = Math.max(1, Math.min(settings.groupCount ?? 2, ids.length));
-      const groupNames = Array.from({ length: groupCount }, (_, i) =>
-        String.fromCharCode(65 + i),
-      );
-      // distribute snake-free (round robin assignment)
-      const groups: string[][] = groupNames.map(() => []);
-      ids.forEach((id, i) => groups[i % groupCount].push(id));
-
-      let matchNumber = 1;
-      for (let g = 0; g < groupCount; g++) {
-        for (const pid of groups[g]) {
-          await tx.player.update({
-            where: { id: pid },
-            data: { groupName: groupNames[g] },
-          });
-        }
-        if (groups[g].length >= 2) {
-          matchNumber = await createRoundRobin(
-            tx,
-            tournamentId,
-            groups[g],
-            "GROUP",
-            groupNames[g],
-            matchNumber,
-          );
-        }
-      }
-    }
-
-    await tx.tournament.update({
-      where: { id: tournamentId },
-      data: { status: "IN_PROGRESS" },
-    });
-  });
-}
-
-async function completeAndAdvance(
-  tx: Tx,
+// Read a match's nextMatchId/nextSlot, then set the winner into the next match.
+async function advanceWinner(
   matchId: string,
   winnerId: string,
   p1Score: number | null,
   p2Score: number | null,
   judgeName: string | null,
 ) {
-  const match = await tx.match.findUnique({ where: { id: matchId } });
+  const match = await prisma.match.findUnique({ where: { id: matchId } });
   if (!match) throw new Error("Match not found");
 
-  await tx.match.update({
+  await prisma.match.update({
     where: { id: matchId },
     data: {
       player1Score: p1Score,
@@ -325,11 +254,72 @@ async function completeAndAdvance(
   });
 
   if (match.nextMatchId) {
-    await tx.match.update({
+    await prisma.match.update({
       where: { id: match.nextMatchId },
       data: match.nextSlot === 1 ? { player1Id: winnerId } : { player2Id: winnerId },
     });
   }
+}
+
+// ---------- public API ----------
+
+export async function generateBracket(tournamentId: string) {
+  const t = await prisma.tournament.findUnique({
+    where: { id: tournamentId },
+    include: { players: { orderBy: { createdAt: "asc" } }, matches: true },
+  });
+  if (!t) throw new Error("Tournament not found");
+  if (t.matches.length > 0) throw new Error("Tournament already started");
+  if (t.players.length < 2) throw new Error("Need at least 2 players");
+
+  // Assign seeds by join order
+  const players = t.players;
+  for (let i = 0; i < players.length; i++) {
+    await prisma.player.update({
+      where: { id: players[i].id },
+      data: { seed: i + 1 },
+    });
+  }
+  const ids = players.map((p) => p.id);
+
+  if (t.format === "SINGLE_ELIM") {
+    await createSingleElim(tournamentId, ids);
+  } else if (t.format === "ROUND_ROBIN") {
+    await createRoundRobin(tournamentId, ids, "ROUND_ROBIN", null);
+  } else {
+    // GROUP_KNOCKOUT
+    const settings = (t.settings as Settings) ?? {};
+    const groupCount = Math.max(1, Math.min(settings.groupCount ?? 2, ids.length));
+    const groupNames = Array.from({ length: groupCount }, (_, i) =>
+      String.fromCharCode(65 + i),
+    );
+    const groups: string[][] = groupNames.map(() => []);
+    ids.forEach((id, i) => groups[i % groupCount].push(id));
+
+    let matchNumber = 1;
+    for (let g = 0; g < groupCount; g++) {
+      for (const pid of groups[g]) {
+        await prisma.player.update({
+          where: { id: pid },
+          data: { groupName: groupNames[g] },
+        });
+      }
+      if (groups[g].length >= 2) {
+        matchNumber = await createRoundRobin(
+          tournamentId,
+          groups[g],
+          "GROUP",
+          groupNames[g],
+          matchNumber,
+        );
+      }
+    }
+  }
+
+  await prisma.tournament.update({
+    where: { id: tournamentId },
+    data: { status: "IN_PROGRESS" },
+  });
 }
 
 export type ResultInput = {
@@ -341,76 +331,75 @@ export type ResultInput = {
 };
 
 export async function recordResult(input: ResultInput) {
-  return prisma.$transaction(async (tx) => {
-    const match = await tx.match.findUnique({
-      where: { id: input.matchId },
-      include: { tournament: true },
+  const match = await prisma.match.findUnique({
+    where: { id: input.matchId },
+    include: { tournament: true },
+  });
+  if (!match) throw new Error("Match not found");
+  if (!match.player1Id || !match.player2Id) {
+    throw new Error("Match is not ready (missing a player)");
+  }
+  if (input.winnerId !== match.player1Id && input.winnerId !== match.player2Id) {
+    throw new Error("Winner must be one of the two players");
+  }
+
+  await advanceWinner(
+    input.matchId,
+    input.winnerId,
+    input.player1Score,
+    input.player2Score,
+    input.judgeName,
+  );
+
+  const t = match.tournament;
+
+  if (t.format === "GROUP_KNOCKOUT" && match.stage === "GROUP") {
+    const remaining = await prisma.match.count({
+      where: { tournamentId: t.id, stage: "GROUP", status: { not: "COMPLETED" } },
     });
-    if (!match) throw new Error("Match not found");
-    if (!match.player1Id || !match.player2Id) {
-      throw new Error("Match is not ready (missing a player)");
+    const knockoutExists = await prisma.match.count({
+      where: { tournamentId: t.id, stage: "KNOCKOUT" },
+    });
+    if (remaining === 0 && knockoutExists === 0) {
+      await buildKnockoutFromGroups(t.id, (t.settings as Settings) ?? {});
     }
-    if (input.winnerId !== match.player1Id && input.winnerId !== match.player2Id) {
-      throw new Error("Winner must be one of the two players");
-    }
+  }
 
-    await completeAndAdvance(
-      tx,
-      input.matchId,
-      input.winnerId,
-      input.player1Score,
-      input.player2Score,
-      input.judgeName,
-    );
+  // Mark tournament COMPLETED when the final knockout match is done
+  if (
+    (match.stage === "KNOCKOUT" || t.format === "SINGLE_ELIM") &&
+    !match.nextMatchId
+  ) {
+    await prisma.tournament.update({
+      where: { id: t.id },
+      data: { status: "COMPLETED" },
+    });
+  }
 
-    const t = match.tournament;
-
-    if (t.format === "GROUP_KNOCKOUT" && match.stage === "GROUP") {
-      // if all group matches done and no knockout exists yet, build it
-      const remaining = await tx.match.count({
-        where: { tournamentId: t.id, stage: "GROUP", status: { not: "COMPLETED" } },
-      });
-      const knockoutExists = await tx.match.count({
-        where: { tournamentId: t.id, stage: "KNOCKOUT" },
-      });
-      if (remaining === 0 && knockoutExists === 0) {
-        await buildKnockoutFromGroups(tx, t.id, (t.settings as Settings) ?? {});
-      }
-    }
-
-    // completion check: the final knockout/elim match has no nextMatchId
-    if (
-      (match.stage === "KNOCKOUT" || t.format === "SINGLE_ELIM") &&
-      !match.nextMatchId
-    ) {
-      await tx.tournament.update({
+  // Round-robin: complete when all matches done
+  if (t.format === "ROUND_ROBIN") {
+    const remaining = await prisma.match.count({
+      where: { tournamentId: t.id, status: { not: "COMPLETED" } },
+    });
+    if (remaining === 0) {
+      await prisma.tournament.update({
         where: { id: t.id },
         data: { status: "COMPLETED" },
       });
     }
-
-    if (t.format === "ROUND_ROBIN") {
-      const remaining = await tx.match.count({
-        where: { tournamentId: t.id, status: { not: "COMPLETED" } },
-      });
-      if (remaining === 0) {
-        await tx.tournament.update({
-          where: { id: t.id },
-          data: { status: "COMPLETED" },
-        });
-      }
-    }
-  });
+  }
 }
 
-async function buildKnockoutFromGroups(tx: Tx, tournamentId: string, settings: Settings) {
+async function buildKnockoutFromGroups(tournamentId: string, settings: Settings) {
   const advancersPerGroup = Math.max(1, settings.advancersPerGroup ?? 2);
-  const players = await tx.player.findMany({ where: { tournamentId } });
-  const matches = await tx.match.findMany({
+  const players = await prisma.player.findMany({ where: { tournamentId } });
+  const matches = await prisma.match.findMany({
     where: { tournamentId, stage: "GROUP" },
   });
 
-  const groupNames = [...new Set(players.map((p) => p.groupName).filter(Boolean))].sort() as string[];
+  const groupNames = [
+    ...new Set(players.map((p) => p.groupName).filter(Boolean)),
+  ].sort() as string[];
 
   const perGroupRanked = groupNames.map((g) =>
     computeStandingsFromMatches(
@@ -419,7 +408,6 @@ async function buildKnockoutFromGroups(tx: Tx, tournamentId: string, settings: S
     ).slice(0, advancersPerGroup),
   );
 
-  // rank-major ordering: all group winners, then all runners-up, ...
   const seededIds: string[] = [];
   for (let rank = 0; rank < advancersPerGroup; rank++) {
     for (const ranked of perGroupRanked) {
@@ -428,15 +416,14 @@ async function buildKnockoutFromGroups(tx: Tx, tournamentId: string, settings: S
   }
 
   if (seededIds.length >= 2) {
-    const maxMatchNumber = await tx.match.aggregate({
+    const agg = await prisma.match.aggregate({
       where: { tournamentId },
       _max: { matchNumber: true },
     });
     await createSingleElim(
-      tx,
       tournamentId,
       seededIds,
-      (maxMatchNumber._max.matchNumber ?? 0) + 1,
+      (agg._max.matchNumber ?? 0) + 1,
     );
   }
 }
