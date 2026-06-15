@@ -163,3 +163,18 @@ export async function submitResult(
   revalidatePath(`/match/${matchId}`);
   return {};
 }
+
+// ---------- live stage ----------
+
+export async function startMatch(_prev: FormState, fd: FormData): Promise<FormState> {
+  const session = await getSession();
+  if (!session) return { error: "Log in as a judge first." };
+  const matchId = str(fd, "matchId");
+  await prisma.match.update({
+    where: { id: matchId },
+    data: { status: "IN_PROGRESS" },
+  });
+  revalidatePath("/live");
+  revalidatePath(`/match/${matchId}`);
+  return {};
+}

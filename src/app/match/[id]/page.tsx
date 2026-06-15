@@ -3,6 +3,7 @@ import { notFound, redirect } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { getSession } from "@/lib/auth";
 import { ScoreForm } from "@/components/forms";
+import { StartMatchForm } from "@/components/start-match-form";
 
 export const dynamic = "force-dynamic";
 
@@ -43,6 +44,10 @@ export default async function MatchPage({
     );
   }
 
+  const isPending = match.status === "PENDING";
+  const isInProgress = match.status === "IN_PROGRESS";
+  const isCompleted = match.status === "COMPLETED";
+
   return (
     <div className="mx-auto max-w-lg space-y-4">
       <div>
@@ -52,24 +57,52 @@ export default async function MatchPage({
         >
           ← {match.tournament.name}
         </Link>
-        <h1 className="text-xl font-bold">Score match #{match.matchNumber}</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-xl font-bold">Score match #{match.matchNumber}</h1>
+          {isInProgress && (
+            <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800">
+              In progress
+            </span>
+          )}
+          {isCompleted && (
+            <span className="rounded-full bg-black/10 px-2 py-0.5 text-xs font-semibold text-black/50">
+              Completed
+            </span>
+          )}
+        </div>
         <p className="text-sm text-black/60">
-          Tap the winner, enter both final scores, then save. Recorded as{" "}
-          <strong>{session.name ?? "Admin"}</strong>.
+          {isPending
+            ? "Start the match when both players are at the stage."
+            : isInProgress
+            ? `Tap the winner, enter both final scores, then save. Recorded as `
+            : `Result recorded by `}
+          {!isPending && <strong>{session.name ?? "Admin"}</strong>}
+          {!isPending && "."}
         </p>
       </div>
 
-      <div className="rounded-xl border border-black/10 bg-white p-4">
-        <ScoreForm
-          matchId={match.id}
-          tournamentId={match.tournamentId}
-          player1={match.player1}
-          player2={match.player2}
-          initialP1={match.player1Score}
-          initialP2={match.player2Score}
-          initialWinnerId={match.winnerId}
-        />
-      </div>
+      {isPending && (
+        <div className="rounded-xl border border-black/10 bg-white p-4 space-y-3">
+          <p className="text-sm text-black/60">
+            {match.player1.name} vs {match.player2.name} — waiting to start.
+          </p>
+          <StartMatchForm matchId={match.id} />
+        </div>
+      )}
+
+      {(isInProgress || isCompleted) && (
+        <div className="rounded-xl border border-black/10 bg-white p-4">
+          <ScoreForm
+            matchId={match.id}
+            tournamentId={match.tournamentId}
+            player1={match.player1}
+            player2={match.player2}
+            initialP1={match.player1Score}
+            initialP2={match.player2Score}
+            initialWinnerId={match.winnerId}
+          />
+        </div>
+      )}
 
       <p className="text-xs text-black/40">
         Mölkky reminder: a game is won by reaching <strong>exactly 50</strong>.
