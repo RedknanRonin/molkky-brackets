@@ -23,7 +23,7 @@ export default async function RootLayout({
               <span className="text-2xl" aria-hidden>
                 🎯
               </span>
-              Mölkky Cup
+              CERN SUMMER MÖLKKY
             </Link>
             <nav className="flex items-center gap-3 text-sm">
               {session ? (
@@ -39,11 +39,17 @@ export default async function RootLayout({
                 </>
               ) : (
                 <>
+                  <Link href="/rules" className="hover:underline">
+                    Rules
+                  </Link>
+                  <Link href="/live" className="hover:underline">
+                    Live
+                  </Link>
                   <Link href="/judge" className="hover:underline">
                     Judge
                   </Link>
                   <Link href="/admin" className="hover:underline">
-                    Admin
+
                   </Link>
                 </>
               )}
