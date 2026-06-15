@@ -20,6 +20,7 @@ const FORMAT_LABEL: Record<string, string> = {
   SINGLE_ELIM: "Single elimination",
   ROUND_ROBIN: "Round robin",
   GROUP_KNOCKOUT: "Groups + knockout",
+  DOUBLE_ELIM: "Double elimination",
 };
 
 export default async function TournamentPage({
@@ -56,6 +57,7 @@ export default async function TournamentPage({
     round: m.round,
     matchNumber: m.matchNumber,
     groupName: m.groupName,
+    bracketSection: m.bracketSection,
     player1: m.player1,
     player2: m.player2,
     player1Score: m.player1Score,
@@ -80,6 +82,11 @@ export default async function TournamentPage({
   if (t.status === "COMPLETED") {
     if (t.format === "ROUND_ROBIN") {
       championName = standings[0]?.name;
+    } else if (t.format === "DOUBLE_ELIM") {
+      const gfMatch = matches.find((m) => m.bracketSection === "GF");
+      championName = gfMatch?.winnerId
+        ? playerName.get(gfMatch.winnerId)
+        : undefined;
     } else {
       const finalMatch = matches
         .filter((m) => m.stage === "KNOCKOUT")
@@ -171,7 +178,7 @@ export default async function TournamentPage({
       {/* Bracket / standings */}
       {t.status !== "REGISTRATION" && (
         <>
-          {(t.format === "SINGLE_ELIM" || t.format === "GROUP_KNOCKOUT") &&
+          {(t.format === "SINGLE_ELIM" || t.format === "GROUP_KNOCKOUT" || t.format === "DOUBLE_ELIM") &&
             matches.some((m) => m.stage === "KNOCKOUT") && (
               <section>
                 <h2 className="mb-3 text-lg font-semibold">Bracket</h2>

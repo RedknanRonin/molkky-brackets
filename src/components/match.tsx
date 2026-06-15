@@ -8,6 +8,7 @@ export type MatchView = {
   round: number;
   matchNumber: number;
   groupName: string | null;
+  bracketSection: string | null;
   player1: PlayerRef;
   player2: PlayerRef;
   player1Score: number | null;
@@ -91,6 +92,38 @@ function roundName(round: number, totalRounds: number) {
   return `Round ${round}`;
 }
 
+function BracketSection({
+  sectionMatches,
+  canJudge,
+}: {
+  sectionMatches: MatchView[];
+  canJudge: boolean;
+}) {
+  const rounds = [...new Set(sectionMatches.map((m) => m.round))].sort(
+    (a, b) => a - b,
+  );
+  const totalRounds = rounds.length;
+  return (
+    <div className="flex gap-6 overflow-x-auto pb-2">
+      {rounds.map((r, idx) => (
+        <div key={r} className="flex min-w-[15rem] flex-col">
+          <h4 className="mb-3 text-sm font-semibold text-black/60">
+            {roundName(idx + 1, totalRounds)}
+          </h4>
+          <div className="flex flex-1 flex-col justify-around gap-4">
+            {sectionMatches
+              .filter((m) => m.round === r)
+              .sort((a, b) => a.matchNumber - b.matchNumber)
+              .map((m) => (
+                <MatchCard key={m.id} match={m} canJudge={canJudge} />
+              ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function Bracket({
   matches,
   canJudge = false,
@@ -102,6 +135,32 @@ export function Bracket({
   if (knockout.length === 0) {
     return <p className="text-sm text-black/50">Bracket not generated yet.</p>;
   }
+
+  // Double-elim: any match has bracketSection set
+  const hasSection = knockout.some((m) => m.bracketSection);
+  if (hasSection) {
+    const sectionDefs: { key: string; label: string }[] = [
+      { key: "WB", label: "Winners Bracket" },
+      { key: "LB", label: "Losers Bracket" },
+      { key: "GF", label: "Grand Final" },
+    ];
+    return (
+      <div className="space-y-8">
+        {sectionDefs.map(({ key, label }) => {
+          const sectionMatches = knockout.filter((m) => m.bracketSection === key);
+          if (sectionMatches.length === 0) return null;
+          return (
+            <div key={key}>
+              <h3 className="mb-3 text-base font-semibold">{label}</h3>
+              <BracketSection sectionMatches={sectionMatches} canJudge={canJudge} />
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Original flat single-elim layout
   const rounds = [...new Set(knockout.map((m) => m.round))].sort((a, b) => a - b);
   const totalRounds = rounds.length;
 

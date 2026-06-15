@@ -81,8 +81,8 @@ export function CreateTournamentForm() {
     <form action={action} className="space-y-3">
       <div>
         <label className={labelClass}>Tournament name</label>
-        <input className={inputClass} name="name" placeholder="Summer Mölkky Cup" />
-      </div>
+        <input className={inputClass} name="name" placeholder="CERN SUMMER MÖLKKY" />
+      </div>  
       <div>
         <label className={labelClass}>Format</label>
         <select
@@ -94,6 +94,7 @@ export function CreateTournamentForm() {
           <option value="SINGLE_ELIM">Single elimination</option>
           <option value="ROUND_ROBIN">Round robin</option>
           <option value="GROUP_KNOCKOUT">Group stage + knockout</option>
+          <option value="DOUBLE_ELIM">Double elimination</option>
         </select>
       </div>
       {format === "GROUP_KNOCKOUT" && (

@@ -261,6 +261,210 @@ async function advanceWinner(
   }
 }
 
+// ---------- double-elimination bracket ----------
+
+async function generateDoubleElim(
+  tournamentId: string,
+  orderedPlayerIds: string[],
+) {
+  const n = orderedPlayerIds.length;
+  if (n < 2) return;
+  const size = nextPow2(n);
+  const k = Math.log2(size); // WB has k rounds
+  const order = seedOrder(size);
+  const slotPlayers = order.map((seed) =>
+    seed <= n ? orderedPlayerIds[seed - 1] : null,
+  );
+
+  let matchNumber = 1;
+
+  // ---- 1. Create WB match shells ----
+  // grid[r] = array of match IDs for WB round r (1-indexed, grid[0] unused)
+  const wbGrid: string[][] = [[]]; // index 0 unused
+  for (let r = 1; r <= k; r++) {
+    const count = size / 2 ** r;
+    const ids: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const m = await prisma.match.create({
+        data: {
+          tournamentId,
+          stage: "KNOCKOUT",
+          round: r,
+          matchNumber: matchNumber++,
+          status: "PENDING",
+          bracketSection: "WB",
+        },
+      });
+      ids.push(m.id);
+    }
+    wbGrid.push(ids);
+  }
+
+  // ---- 2. Link WB winner advancement ----
+  for (let r = 1; r < k; r++) {
+    for (let i = 0; i < wbGrid[r].length; i++) {
+      await prisma.match.update({
+        where: { id: wbGrid[r][i] },
+        data: {
+          nextMatchId: wbGrid[r + 1][Math.floor(i / 2)],
+          nextSlot: i % 2 === 0 ? 1 : 2,
+        },
+      });
+    }
+  }
+
+  // ---- 3. Seed WB R1 players ----
+  for (let i = 0; i < wbGrid[1].length; i++) {
+    await prisma.match.update({
+      where: { id: wbGrid[1][i] },
+      data: { player1Id: slotPlayers[2 * i], player2Id: slotPlayers[2 * i + 1] },
+    });
+  }
+
+  // ---- 4. Resolve WB byes ----
+  for (let i = 0; i < wbGrid[1].length; i++) {
+    const p1 = slotPlayers[2 * i];
+    const p2 = slotPlayers[2 * i + 1];
+    if ((p1 && !p2) || (!p1 && p2)) {
+      await advanceWinner(wbGrid[1][i], (p1 ?? p2)!, null, null, "BYE");
+    }
+  }
+
+  // ---- 5. Build LB rounds ----
+  // LB round numbering is sequential. We use a virtual LB round counter.
+  // lbGrid[lbRound] = array of match IDs
+  // We also track which WB round feeds losers into each LB round.
+  //
+  // Structure (for size=8, k=3):
+  //   LB R1 (consolidation): size/4 = 2 matches — WB R1 losers paired up
+  //   LB R2 (integration):   size/4 = 2 matches — LB R1 winners vs WB R2 losers
+  //   LB R3 (consolidation): size/8 = 1 match  — LB R2 winners paired up
+  //   LB R4 (integration):   size/8 = 1 match  — LB R3 winner vs WB R3 loser (WB Final loser)
+  // Then Grand Final.
+  //
+  // General pattern: LB has 2*(k-1) rounds.
+  // Odd LB rounds (1,3,5,...) are consolidation (no new WB entrants, pair previous LB winners).
+  // Even LB rounds (2,4,6,...) are integration (LB winners vs the next tier of WB losers).
+  // WB losers enter at:
+  //   LB R1: WB R1 losers (size/2 players → size/4 matches)
+  //   LB R2: WB R2 losers
+  //   LB R4: WB R3 losers
+  //   LB R(2j): WB R(j+1) losers, for j=1..(k-1)
+
+  const lbGrid: string[][] = [[]]; // index 0 unused; lbGrid[lb] = match IDs for LB round lb
+  const totalLbRounds = 2 * (k - 1);
+
+  // Helper: track WB round loser arrays (filled as we create LB matches)
+  // We'll set loserMatchId/loserSlot on WB matches when we know the LB targets.
+
+  let prevLbIds: string[] = []; // match IDs from the previous LB round
+
+  for (let lb = 1; lb <= totalLbRounds; lb++) {
+    const isIntegration = lb % 2 === 0;
+    const wbRoundForLosers = isIntegration ? lb / 2 + 1 : 0; // WB round whose losers enter this LB round (integration only)
+
+    // Number of matches in this LB round
+    let matchCount: number;
+    if (lb === 1) {
+      matchCount = size / 4; // WB R1 has size/2 losers → pair into size/4 matches
+    } else if (isIntegration) {
+      matchCount = prevLbIds.length; // same count as prev (one LB winner + one WB loser each)
+    } else {
+      matchCount = prevLbIds.length / 2; // consolidation halves the field
+    }
+
+    const ids: string[] = [];
+    for (let i = 0; i < matchCount; i++) {
+      const m = await prisma.match.create({
+        data: {
+          tournamentId,
+          stage: "KNOCKOUT",
+          round: k + lb, // LB rounds follow WB rounds in the round numbering
+          matchNumber: matchNumber++,
+          status: "PENDING",
+          bracketSection: "LB",
+        },
+      });
+      ids.push(m.id);
+    }
+    lbGrid.push(ids);
+
+    if (lb === 1) {
+      // Consolidation: pair WB R1 losers
+      // WB R1 losers: wbGrid[1][0], wbGrid[1][1], ..., (size/2 matches → size/2 losers)
+      // Pair them: LB R1 match i ← loser of WB R1[2i] (slot 1) and loser of WB R1[2i+1] (slot 2)
+      for (let i = 0; i < matchCount; i++) {
+        await prisma.match.update({
+          where: { id: wbGrid[1][2 * i] },
+          data: { loserMatchId: ids[i], loserSlot: 1 },
+        });
+        await prisma.match.update({
+          where: { id: wbGrid[1][2 * i + 1] },
+          data: { loserMatchId: ids[i], loserSlot: 2 },
+        });
+      }
+    } else if (isIntegration) {
+      // Integration: link prev LB round winners and WB round losers
+      // prevLbIds[i].winner → slot 1; WB R(wbRoundForLosers)[i] loser → slot 2
+      for (let i = 0; i < matchCount; i++) {
+        // Link prev LB match winner → this LB match slot 1
+        await prisma.match.update({
+          where: { id: prevLbIds[i] },
+          data: { nextMatchId: ids[i], nextSlot: 1 },
+        });
+        // Link WB loser → this LB match slot 2
+        await prisma.match.update({
+          where: { id: wbGrid[wbRoundForLosers][i] },
+          data: { loserMatchId: ids[i], loserSlot: 2 },
+        });
+      }
+    } else {
+      // Consolidation: pair up prev LB round winners
+      for (let i = 0; i < matchCount; i++) {
+        await prisma.match.update({
+          where: { id: prevLbIds[2 * i] },
+          data: { nextMatchId: ids[i], nextSlot: 1 },
+        });
+        await prisma.match.update({
+          where: { id: prevLbIds[2 * i + 1] },
+          data: { nextMatchId: ids[i], nextSlot: 2 },
+        });
+      }
+    }
+
+    prevLbIds = ids;
+  }
+
+  // ---- 6. Grand Final ----
+  const gf = await prisma.match.create({
+    data: {
+      tournamentId,
+      stage: "KNOCKOUT",
+      round: k + totalLbRounds + 1,
+      matchNumber: matchNumber++,
+      status: "PENDING",
+      bracketSection: "GF",
+    },
+  });
+
+  // WB Final winner → GF slot 1
+  await prisma.match.update({
+    where: { id: wbGrid[k][0] },
+    data: { nextMatchId: gf.id, nextSlot: 1 },
+  });
+
+  // WB Final loser → LB Final (last LB round, slot 2) — already set via integration above
+  // But for k=1 (2 players) there are no LB rounds, handle that edge case:
+  if (totalLbRounds > 0) {
+    // LB Final winner → GF slot 2
+    const lbFinalId = prevLbIds[0];
+    await prisma.match.update({
+      where: { id: lbFinalId },
+      data: { nextMatchId: gf.id, nextSlot: 2 },
+    });
+  }
+}
+
 // ---------- public API ----------
 
 export async function generateBracket(tournamentId: string) {
@@ -284,6 +488,8 @@ export async function generateBracket(tournamentId: string) {
 
   if (t.format === "SINGLE_ELIM") {
     await createSingleElim(tournamentId, ids);
+  } else if (t.format === "DOUBLE_ELIM") {
+    await generateDoubleElim(tournamentId, ids);
   } else if (t.format === "ROUND_ROBIN") {
     await createRoundRobin(tournamentId, ids, "ROUND_ROBIN", null);
   } else {
@@ -353,6 +559,18 @@ export async function recordResult(input: ResultInput) {
 
   const t = match.tournament;
 
+  // Double-elim: advance the loser to their LB match
+  if (t.format === "DOUBLE_ELIM" && match.loserMatchId) {
+    const loserId =
+      match.player1Id === input.winnerId ? match.player2Id : match.player1Id;
+    if (loserId) {
+      await prisma.match.update({
+        where: { id: match.loserMatchId },
+        data: match.loserSlot === 1 ? { player1Id: loserId } : { player2Id: loserId },
+      });
+    }
+  }
+
   if (t.format === "GROUP_KNOCKOUT" && match.stage === "GROUP") {
     const remaining = await prisma.match.count({
       where: { tournamentId: t.id, stage: "GROUP", status: { not: "COMPLETED" } },
@@ -366,10 +584,15 @@ export async function recordResult(input: ResultInput) {
   }
 
   // Mark tournament COMPLETED when the final knockout match is done
-  if (
+  const isDoubleElimFinal =
+    t.format === "DOUBLE_ELIM" &&
+    match.bracketSection === "GF" &&
+    !match.nextMatchId;
+  const isSingleElimFinal =
+    t.format !== "DOUBLE_ELIM" &&
     (match.stage === "KNOCKOUT" || t.format === "SINGLE_ELIM") &&
-    !match.nextMatchId
-  ) {
+    !match.nextMatchId;
+  if (isDoubleElimFinal || isSingleElimFinal) {
     await prisma.tournament.update({
       where: { id: t.id },
       data: { status: "COMPLETED" },
