@@ -54,10 +54,11 @@ export async function createTournament(
   const name = str(fd, "name");
   const format = str(fd, "format") as TournamentFormat;
   if (!name) return { error: "Enter a tournament name." };
-  if (!["SINGLE_ELIM", "ROUND_ROBIN", "GROUP_KNOCKOUT"].includes(format)) {
+  if (!["SINGLE_ELIM", "ROUND_ROBIN", "GROUP_KNOCKOUT", "DOUBLE_ELIM"].includes(format)) {
     return { error: "Pick a format." };
   }
 
+  const trackThrows = fd.get("trackThrows") === "on";
   const settings: Record<string, number> = {};
   if (format === "GROUP_KNOCKOUT") {
     settings.groupCount = Math.max(1, Number(str(fd, "groupCount") || "2"));
@@ -68,7 +69,7 @@ export async function createTournament(
   }
 
   const t = await prisma.tournament.create({
-    data: { name, format, settings },
+    data: { name, format, settings, trackThrows },
   });
   revalidatePath("/");
   redirect(`/t/${t.id}`);
@@ -82,9 +83,11 @@ export async function joinTournament(
   const name = str(fd, "name");
   if (!name) return { error: "Enter your name." };
 
+  const session = await getSession();
   const t = await prisma.tournament.findUnique({ where: { id: tournamentId } });
   if (!t) return { error: "Tournament not found." };
-  if (t.status !== "REGISTRATION") return { error: "Registration is closed." };
+  if (t.status === "COMPLETED") return { error: "Tournament is finished." };
+  if (t.status === "IN_PROGRESS" && !session) return { error: "Only judges can add players during a live tournament." };
 
   const existing = await prisma.player.findFirst({
     where: { tournamentId, name: { equals: name, mode: "insensitive" } },
@@ -160,6 +163,89 @@ export async function submitResult(
   }
 
   revalidatePath(`/t/${tournamentId}`);
+  revalidatePath(`/match/${matchId}`);
+  redirect(`/t/${tournamentId}`);
+}
+
+// ---------- throw tracking ----------
+
+function runningTotal(scores: number[]): number {
+  let total = 0;
+  for (const s of scores) {
+    total += s;
+    if (total > 50) total = 25;
+  }
+  return total;
+}
+
+function consecutiveMisses(scores: number[]): number {
+  let count = 0;
+  for (let i = scores.length - 1; i >= 0; i--) {
+    if (scores[i] === 0) count++;
+    else break;
+  }
+  return count;
+}
+
+export async function recordThrow(
+  _prev: FormState,
+  fd: FormData,
+): Promise<FormState> {
+  const session = await getSession();
+  if (!session) return { error: "Log in as a judge first." };
+
+  const matchId = str(fd, "matchId");
+  const score = Number(str(fd, "score"));
+
+  if (!Number.isInteger(score) || score < 0 || score > 12) {
+    return { error: "Score must be 0–12." };
+  }
+
+  const match = await prisma.match.findUnique({
+    where: { id: matchId },
+    include: {
+      tournament: { select: { id: true, trackThrows: true } },
+      throws: { orderBy: { throwNumber: "asc" } },
+    },
+  });
+
+  if (!match) return { error: "Match not found." };
+  if (!match.tournament.trackThrows) return { error: "Throw tracking not enabled." };
+  if (match.status === "COMPLETED") return { error: "Match is already completed." };
+  if (!match.player1Id || !match.player2Id) return { error: "Players not assigned." };
+
+  const throwNumber = match.throws.length + 1;
+  // Odd throw numbers go to player 1, even to player 2
+  const playerId = throwNumber % 2 === 1 ? match.player1Id : match.player2Id;
+
+  await prisma.throw.create({ data: { matchId, playerId, score, throwNumber } });
+
+  const allThrows = [...match.throws, { playerId, score }];
+  const p1Scores = allThrows.filter((t) => t.playerId === match.player1Id).map((t) => t.score);
+  const p2Scores = allThrows.filter((t) => t.playerId === match.player2Id).map((t) => t.score);
+
+  const p1Total = runningTotal(p1Scores);
+  const p2Total = runningTotal(p2Scores);
+
+  let winnerId: string | null = null;
+  if (p1Total === 50) winnerId = match.player1Id;
+  else if (p2Total === 50) winnerId = match.player2Id;
+  else if (consecutiveMisses(p1Scores) >= 3) winnerId = match.player2Id;
+  else if (consecutiveMisses(p2Scores) >= 3) winnerId = match.player1Id;
+
+  if (winnerId) {
+    await recordResult({
+      matchId,
+      player1Score: p1Total,
+      player2Score: p2Total,
+      winnerId,
+      judgeName: session.name ?? "Judge",
+    });
+    revalidatePath(`/t/${match.tournamentId}`);
+    revalidatePath(`/match/${matchId}`);
+    redirect(`/t/${match.tournamentId}`);
+  }
+
   revalidatePath(`/match/${matchId}`);
   return {};
 }

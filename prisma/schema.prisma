@@ -36,14 +36,14 @@ enum MatchStatus {
 }
 
 model Tournament {
-  id        String           @id @default(cuid())
-  name      String
-  format    TournamentFormat
-  status    TournamentStatus @default(REGISTRATION)
-  // Format settings, e.g. { "groupCount": 2, "advancersPerGroup": 2 }
-  settings  Json             @default("{}")
-  createdAt DateTime         @default(now())
-  updatedAt DateTime         @updatedAt
+  id          String           @id @default(cuid())
+  name        String
+  format      TournamentFormat
+  status      TournamentStatus @default(REGISTRATION)
+  settings    Json             @default("{}")
+  trackThrows Boolean          @default(false)
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
 
   players Player[]
   matches Match[]
@@ -58,9 +58,10 @@ model Player {
   groupName    String?
   createdAt    DateTime   @default(now())
 
-  matchesAsP1 Match[] @relation("MatchPlayer1")
-  matchesAsP2 Match[] @relation("MatchPlayer2")
-  matchesWon  Match[] @relation("MatchWinner")
+  matchesAsP1 Match[]  @relation("MatchPlayer1")
+  matchesAsP2 Match[]  @relation("MatchPlayer2")
+  matchesWon  Match[]  @relation("MatchWinner")
+  throws      Throw[]
 
   @@index([tournamentId])
 }
@@ -98,9 +99,24 @@ model Match {
   loserSlot      Int?    // 1 or 2
   bracketSection String? // "WB", "LB", or "GF"
 
+  throws Throw[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([tournamentId])
   @@index([tournamentId, stage, round])
+}
+
+model Throw {
+  id          String   @id @default(cuid())
+  matchId     String
+  match       Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  playerId    String
+  player      Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  score       Int
+  throwNumber Int      // 1-based, global across both players in this match
+  createdAt   DateTime @default(now())
+
+  @@index([matchId])
 }

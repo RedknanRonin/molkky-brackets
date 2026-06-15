@@ -121,6 +121,11 @@ export function CreateTournamentForm() {
           </div>
         </div>
       )}
+      <label className="flex items-center gap-2 cursor-pointer select-none">
+        <input type="checkbox" name="trackThrows" className="rounded border-black/20 accent-emerald-700" />
+        <span className="text-sm">Track individual throws (auto-ends at 50 pts or 3 misses)</span>
+      </label>
+
       {state.error && <p className={errorClass}>{state.error}</p>}
       <SubmitButton>Create tournament</SubmitButton>
     </form>

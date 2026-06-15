@@ -129,6 +129,14 @@ export default async function TournamentPage({
         </div>
       )}
 
+      {/* Add player during live tournament (judges only) */}
+      {t.status === "IN_PROGRESS" && canJudge && (
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/60 p-4">
+          <h2 className="mb-2 font-semibold">Add player</h2>
+          <JoinForm tournamentId={t.id} />
+        </div>
+      )}
+
       {/* Registration view */}
       {t.status === "REGISTRATION" && (
         <section className="space-y-4">
